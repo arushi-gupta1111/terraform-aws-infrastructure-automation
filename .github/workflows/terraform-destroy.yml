@@ -1,0 +1,108 @@
+
+name: Terraform Controlled Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type DESTROY to confirm'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+jobs:
+  destroy-plan:
+    if: ${{ inputs.confirmation == 'DESTROY' }}
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: environments/dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: eu-north-1
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Generate Destroy Plan
+        run: |
+          terraform plan -destroy \
+            -input=false \
+            -out=destroy.tfplan
+
+          terraform show -no-color destroy.tfplan
+
+      - name: Upload Destroy Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-destroy-plan
+          path: environments/dev/destroy.tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  approval:
+    needs: destroy-plan
+    runs-on: ubuntu-latest
+    environment: terraform-approval
+
+    steps:
+      - name: Destroy Approved
+        run: echo "Destroy approved"
+
+  destroy:
+    needs: approval
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: environments/dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: eu-north-1
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Download Approved Destroy Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-destroy-plan
+          path: environments/dev
+
+      - name: Terraform Destroy
+        run: terraform apply -input=false destroy.tfplan
+
+      - name: Verify Remaining Resources
+        run: terraform state list
